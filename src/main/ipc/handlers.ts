@@ -364,6 +364,9 @@ export const registerHandlers = (): void => {
   });
 
   ipcMain.handle("shell:openExternal", async (_event, url: string) => {
+    if (typeof url !== "string" || !/^https?:\/\//.test(url)) {
+      throw new Error("Only http/https URLs are allowed");
+    }
     const { shell } = await import("electron");
     await shell.openExternal(url);
     return { ok: true };
