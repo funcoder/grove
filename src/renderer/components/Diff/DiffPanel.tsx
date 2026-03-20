@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import type { DiffFileInfo, FileDiffResult } from "../../../main/ipc/contracts";
 import { grove } from "../../lib/desktop-api";
 import { useAppStore } from "../../state/use-app-store";
+import { useToastStore } from "../../state/use-toast-store";
 import { DiffFileList } from "./DiffFileList";
 import { DiffViewer } from "./DiffViewer";
 import { DiffToolbar } from "./DiffToolbar";
@@ -13,8 +14,10 @@ interface Props {
 export function DiffPanel({ worktreePath }: Props) {
   const setSnapshot = useAppStore((s) => s.setSnapshot);
   const repos = useAppStore((s) => s.repos);
+  const showToast = useToastStore((s) => s.show);
   const activeWorktree = repos[0]?.worktrees.find((wt) => wt.path === worktreePath);
   const aheadCount = activeWorktree?.aheadBehind.ahead ?? 0;
+  const behindCount = activeWorktree?.aheadBehind.behind ?? 0;
   const [showStaged, setShowStaged] = useState(false);
   const [files, setFiles] = useState<DiffFileInfo[]>([]);
   const [activeFilePath, setActiveFilePath] = useState<string>();
@@ -105,12 +108,30 @@ export function DiffPanel({ worktreePath }: Props) {
           return message;
         }}
         onPush={async () => {
-          await grove.push({ worktreePath });
-          const snapshot = await grove.refresh();
-          setSnapshot(snapshot);
+          try {
+            await grove.push({ worktreePath });
+            const snapshot = await grove.refresh();
+            setSnapshot(snapshot);
+            showToast("Pushed successfully", "success");
+          } catch (error) {
+            showToast(`Push failed: ${error instanceof Error ? error.message : "Unknown error"}`, "error");
+          }
+        }}
+        onPull={async () => {
+          try {
+            const result = await grove.pull({ worktreePath });
+            await loadFiles();
+            const snapshot = await grove.refresh();
+            setSnapshot(snapshot);
+            const summary = result?.summary ?? "Already up to date";
+            showToast(`Pulled — ${summary}`, "success");
+          } catch (error) {
+            showToast(`Pull failed: ${error instanceof Error ? error.message : "Unknown error"}`, "error");
+          }
         }}
         hasChanges={files.length > 0}
         aheadCount={aheadCount}
+        behindCount={behindCount}
       />
       <div className="flex flex-1 overflow-hidden">
         <div className="w-52 border-r border-zinc-800 overflow-y-auto">

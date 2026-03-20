@@ -68,6 +68,15 @@ export class RepoController {
     return this.refreshRepo(repoId, repoPath);
   }
 
+  async checkoutRemoteBranch(repoPath: string, remoteBranch: string): Promise<AppSnapshot> {
+    const repoId = makeRepoId(repoPath);
+    const entry = this.repos.get(repoId);
+    if (!entry) throw new Error(`Repo not registered: ${repoPath}`);
+
+    await entry.worktree.checkoutRemote(remoteBranch);
+    return this.refreshRepo(repoId, repoPath);
+  }
+
   setActiveWorktree(worktreeId: string): AppSnapshot {
     const activeRepo = this.snapshot.repos.find((r) => r.repo.path);
     if (!activeRepo) return this.snapshot;
@@ -154,6 +163,7 @@ export class RepoController {
     const repo: RepoInfo = { path: repoPath, name, currentBranch, remoteUrl };
 
     return {
+      id: repoId,
       repo,
       worktrees: enrichedWorktrees,
       activeWorktreeId: enrichedWorktrees[0]?.id ?? "",
@@ -200,17 +210,26 @@ export class RepoController {
     return this.pushSnapshot(next);
   }
 
+  private fetchCounter = 0;
+
   private startPolling(): void {
     if (this.pollTimer) return;
 
     this.pollTimer = setInterval(async () => {
+      this.fetchCounter++;
+
       for (const [repoId, entry] of this.repos) {
         const repo = this.snapshot.repos.find(
           (r) => makeRepoId(r.repo.path) === repoId
         );
-        if (repo) {
-          await this.refreshRepo(repoId, repo.repo.path);
+        if (!repo) continue;
+
+        // Fetch from remote every 30s (every 6th poll) so behind counts stay accurate
+        if (this.fetchCounter % 6 === 0) {
+          await entry.git.fetch();
         }
+
+        await this.refreshRepo(repoId, repo.repo.path);
       }
     }, 5000);
   }

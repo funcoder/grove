@@ -2,15 +2,15 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import Markdown from "react-markdown";
 import type { ClaudeChatEvent } from "../../../main/ipc/contracts";
 import { grove } from "../../lib/desktop-api";
-import { getChatState, setChatState, type ChatState } from "../../lib/chat-store";
-
-interface ActivityItem {
-  id: string;
-  type: "tool" | "error";
-  toolName?: string;
-  detail: string;
-  result?: string;
-}
+import {
+  getChatState,
+  setChatState,
+  clearChatState,
+  type ChatState,
+  type ChatMessage,
+  type ActivityItem
+} from "../../lib/chat-store";
+import { ChatMessageBubble } from "./ChatMessageBubble";
 
 function extractText(node: React.ReactNode): string {
   if (typeof node === "string") return node;
@@ -29,43 +29,62 @@ interface Props {
 }
 
 export function ChatPanel({ worktreePath }: Props) {
-  const [result, setResult] = useState("");
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [activePrompt, setActivePrompt] = useState("");
+  const [activeResult, setActiveResult] = useState("");
+  const [activeActivity, setActiveActivity] = useState<ActivityItem[]>([]);
   const [resultStreaming, setResultStreaming] = useState(false);
-  const [activity, setActivity] = useState<ActivityItem[]>([]);
-  const [prompt, setPrompt] = useState("");
   const [input, setInput] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
+  const [planMode, setPlanMode] = useState(() => {
+    try { return localStorage.getItem("grove:plan-mode") === "true"; } catch { return false; }
+  });
   const [activityOpen, setActivityOpen] = useState(true);
   const activityEndRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const prevWorktreeRef = useRef<string>(worktreePath);
-  const stateRef = useRef({ result: "", resultStreaming: false, activity: [] as ActivityItem[], prompt: "", streaming: false, sessionId: null as string | null });
+  const stateRef = useRef<ChatState>({
+    sessionId: null,
+    messages: [],
+    activePrompt: "",
+    activeResult: "",
+    activeActivity: [],
+    streaming: false,
+    resultStreaming: false
+  });
 
-  // Keep ref in sync with state
-  stateRef.current = { result, resultStreaming, activity, prompt, streaming, sessionId };
+  // Keep ref in sync
+  stateRef.current = {
+    sessionId,
+    messages,
+    activePrompt,
+    activeResult,
+    activeActivity,
+    streaming,
+    resultStreaming
+  };
 
   // Save previous worktree state + load new worktree state on switch
   useEffect(() => {
     const prevPath = prevWorktreeRef.current;
 
-    // Save previous worktree's state
     if (prevPath !== worktreePath) {
       setChatState(prevPath, stateRef.current);
     }
 
-    // Load new worktree's state
     const stored = getChatState(worktreePath);
-    setResult(stored.result);
+    setMessages(stored.messages);
+    setActivePrompt(stored.activePrompt);
+    setActiveResult(stored.activeResult);
+    setActiveActivity(stored.activeActivity);
     setResultStreaming(stored.resultStreaming);
-    setActivity(stored.activity);
-    setPrompt(stored.prompt);
     setStreaming(stored.streaming);
     setSessionId(stored.sessionId);
     setInput("");
 
     prevWorktreeRef.current = worktreePath;
 
-    // Init session if none exists for this worktree
     if (!stored.sessionId) {
       grove.claudeChatInit({ worktreePath }).then(({ sessionId: id }) => {
         setSessionId(id);
@@ -73,7 +92,7 @@ export function ChatPanel({ worktreePath }: Props) {
     }
   }, [worktreePath]);
 
-  // Save current state on unmount
+  // Save on unmount
   useEffect(() => {
     return () => {
       setChatState(prevWorktreeRef.current, stateRef.current);
@@ -87,9 +106,9 @@ export function ChatPanel({ worktreePath }: Props) {
 
       if (event.type === "text") {
         setResultStreaming(true);
-        setResult((prev) => prev + event.content);
+        setActiveResult((prev) => prev + event.content);
       } else if (event.type === "tool_use") {
-        setActivity((prev) => [
+        setActiveActivity((prev) => [
           ...prev,
           {
             id: crypto.randomUUID(),
@@ -99,18 +118,15 @@ export function ChatPanel({ worktreePath }: Props) {
           }
         ]);
       } else if (event.type === "tool_result") {
-        setActivity((prev) => {
+        setActiveActivity((prev) => {
           const last = prev[prev.length - 1];
           if (last?.type === "tool") {
-            return [
-              ...prev.slice(0, -1),
-              { ...last, result: event.content }
-            ];
+            return [...prev.slice(0, -1), { ...last, result: event.content }];
           }
           return prev;
         });
       } else if (event.type === "error") {
-        setActivity((prev) => [
+        setActiveActivity((prev) => [
           ...prev,
           {
             id: crypto.randomUUID(),
@@ -119,6 +135,29 @@ export function ChatPanel({ worktreePath }: Props) {
           }
         ]);
       } else if (event.type === "done") {
+        // Finalize the active message into history using ref for current values
+        const { activePrompt: prompt, activeResult: result, activeActivity: activity } = stateRef.current;
+        if (prompt || result) {
+          const completed: ChatMessage = {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            prompt,
+            result,
+            activity,
+            timestamp: Date.now()
+          };
+          // Guard: don't add if last message has same prompt (prevents duplicates)
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last && last.prompt === prompt && last.result.slice(0, 100) === result.slice(0, 100)) {
+              return prev;
+            }
+            return [...prev, completed];
+          });
+        }
+        setActivePrompt("");
+        setActiveResult("");
+        setActiveActivity([]);
         setStreaming(false);
         setResultStreaming(false);
       }
@@ -127,7 +166,7 @@ export function ChatPanel({ worktreePath }: Props) {
     return unsub;
   }, [sessionId]);
 
-  // Periodic save so streaming results aren't lost on switch
+  // Periodic save
   useEffect(() => {
     const interval = setInterval(() => {
       setChatState(worktreePath, stateRef.current);
@@ -135,23 +174,30 @@ export function ChatPanel({ worktreePath }: Props) {
     return () => clearInterval(interval);
   }, [worktreePath]);
 
-  // Auto-scroll activity
+  // Auto-scroll
   useEffect(() => {
-    activityEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activity]);
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [activeResult, activeActivity, messages]);
 
   const sendMessage = useCallback(async (message: string) => {
     if (!sessionId || streaming) return;
 
-    setPrompt(message);
+    // In plan mode, wrap the prompt so Claude plans first
+    const actualMessage = planMode
+      ? `${message}\n\nIMPORTANT: Do NOT implement anything yet. First create a detailed plan with numbered steps. List the files you'll change and what you'll do in each. Then STOP and wait for my explicit approval before writing any code.`
+      : message;
+
     setInput("");
-    setResult("");
-    setActivity([]);
+    setActivePrompt(message); // Show the original prompt in UI
+    setActiveResult("");
+    setActiveActivity([]);
     setStreaming(true);
     setResultStreaming(false);
 
-    await grove.claudeChatSend({ sessionId, message });
-  }, [sessionId, streaming]);
+    await grove.claudeChatSend({ sessionId, message: actualMessage });
+  }, [sessionId, streaming, planMode]);
 
   const handleSend = useCallback(async () => {
     if (!input.trim()) return;
@@ -163,11 +209,63 @@ export function ChatPanel({ worktreePath }: Props) {
     grove.claudeChatCancel({ sessionId });
   }, [sessionId]);
 
+  const handleTogglePlanMode = useCallback(() => {
+    const next = !planMode;
+    setPlanMode(next);
+    try { localStorage.setItem("grove:plan-mode", String(next)); } catch { /* ignore */ }
+  }, [planMode]);
+
+  const handleNewSession = useCallback(async () => {
+    if (!worktreePath) return;
+    // Cancel any active work
+    if (sessionId && streaming) {
+      grove.claudeChatCancel({ sessionId });
+    }
+    clearChatState(worktreePath);
+    setMessages([]);
+    setActivePrompt("");
+    setActiveResult("");
+    setActiveActivity([]);
+    setStreaming(false);
+    setResultStreaming(false);
+
+    const { sessionId: newId } = await grove.claudeChatReset({ worktreePath });
+    setSessionId(newId);
+  }, [worktreePath, sessionId, streaming]);
+
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const [showHistory, setShowHistory] = useState(false);
+
+  // Build unique prompt list from messages (most recent first)
+  const promptHistory = [...messages]
+    .reverse()
+    .map((m) => m.prompt)
+    .filter((p, i, arr) => p && arr.indexOf(p) === i);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
+      setHistoryIndex(-1);
+    } else if (e.key === "ArrowUp" && !input && promptHistory.length > 0) {
+      e.preventDefault();
+      const next = Math.min(historyIndex + 1, promptHistory.length - 1);
+      setHistoryIndex(next);
+      setInput(promptHistory[next]);
+    } else if (e.key === "ArrowDown" && historyIndex >= 0) {
+      e.preventDefault();
+      const next = historyIndex - 1;
+      setHistoryIndex(next);
+      setInput(next >= 0 ? promptHistory[next] : "");
+    } else if (e.key === "Escape" && showHistory) {
+      setShowHistory(false);
     }
+  };
+
+  const handleSelectHistory = (prompt: string) => {
+    setInput(prompt);
+    setShowHistory(false);
+    setHistoryIndex(-1);
   };
 
   const markdownComponents = {
@@ -177,8 +275,7 @@ export function ChatPanel({ worktreePath }: Props) {
     p: ({ children }: { children?: React.ReactNode }) => <p className="mb-2 leading-relaxed">{children}</p>,
     ul: ({ children }: { children?: React.ReactNode }) => <ul className="mb-2 ml-4 list-disc space-y-1">{children}</ul>,
     ol: ({ children }: { children?: React.ReactNode }) => <ol className="mb-2 ml-4 list-decimal space-y-2">{children}</ol>,
-    li: ({ node, children }: { node?: { position?: { start?: { line?: number } } }; children?: React.ReactNode }) => {
-      // Check if parent is an ordered list by looking at the node context
+    li: ({ children }: { children?: React.ReactNode }) => {
       const textContent = extractText(children);
       const isActionable = textContent.length > 10;
 
@@ -229,96 +326,138 @@ export function ChatPanel({ worktreePath }: Props) {
     hr: () => <hr className="my-3 border-zinc-800" />
   };
 
-  // Empty state
-  if (!prompt && !streaming) {
-    return (
-      <div className="flex h-full flex-col bg-zinc-950">
-        <div className="flex flex-1 items-center justify-center px-4">
-          <div className="text-center">
-            <p className="text-sm text-zinc-500">Ask Claude about this worktree</p>
-            <p className="mt-1 text-xs text-zinc-600">Has full context of the codebase</p>
-          </div>
-        </div>
-        <div className="border-t border-zinc-800 px-3 py-2">
-          <div className="flex items-end gap-2">
-            <textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Ask Claude..."
-              rows={2}
-              className="flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-blue-600 placeholder:text-zinc-500"
-              style={{ maxHeight: 120 }}
-            />
-            <button
-              onClick={handleSend}
-              disabled={!input.trim() || !sessionId}
-              className="flex-shrink-0 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
-            >
-              Send
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const hasHistory = messages.length > 0;
+  const hasActiveMessage = activePrompt || streaming;
+  const isEmpty = !hasHistory && !hasActiveMessage;
 
   return (
     <div className="flex h-full flex-col bg-zinc-950">
-      {/* Prompt */}
-      <div className="flex-shrink-0 border-b border-zinc-800 bg-zinc-900/30 px-4 py-2.5">
-        <p className="text-sm text-zinc-400">{prompt}</p>
-      </div>
+      {/* Header with Plan Mode + New Session */}
+      {(hasHistory || hasActiveMessage) && (
+        <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-1.5">
+          <span className="text-[10px] uppercase tracking-wider text-zinc-600">
+            {messages.length} message{messages.length !== 1 ? "s" : ""}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleTogglePlanMode}
+              className={`flex items-center gap-1 rounded px-2 py-0.5 text-[10px] ${
+                planMode
+                  ? "bg-amber-600/20 text-amber-400"
+                  : "text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+              }`}
+              title={planMode ? "Plan mode ON — Claude will plan before coding" : "Plan mode OFF — Claude will code directly"}
+            >
+              <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 0 0 2.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 0 0-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75 2.25 2.25 0 0 0-.1-.664m-5.8 0A2.251 2.251 0 0 1 13.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25Z" />
+              </svg>
+              Plan
+            </button>
+            <button
+              onClick={handleNewSession}
+              className="flex items-center gap-1 rounded px-2 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+              title="Start a new conversation"
+            >
+              <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+              </svg>
+              New
+            </button>
+          </div>
+        </div>
+      )}
 
-      {/* Result Panel — scrolls from top */}
-      <div className="flex-1 overflow-y-auto px-4 py-3">
-        {result ? (
-          <div className="text-sm text-zinc-200">
-            <Markdown components={markdownComponents}>{result}</Markdown>
-            {resultStreaming && (
-              <span className="inline-block h-4 w-1.5 animate-pulse bg-blue-400" />
+      {/* Scrollable message area */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3">
+        {isEmpty ? (
+          <div className="flex h-full flex-col items-center justify-center gap-3">
+            <div className="text-center">
+              <p className="text-sm text-zinc-500">Ask Claude about this worktree</p>
+              <p className="mt-1 text-xs text-zinc-600">Has full context of the codebase</p>
+            </div>
+            <button
+              onClick={handleTogglePlanMode}
+              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs ${
+                planMode
+                  ? "bg-amber-600/20 text-amber-400 border border-amber-600/30"
+                  : "bg-zinc-800 text-zinc-500 border border-zinc-700 hover:text-zinc-300"
+              }`}
+            >
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 0 0 2.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 0 0-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75 2.25 2.25 0 0 0-.1-.664m-5.8 0A2.251 2.251 0 0 1 13.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25Z" />
+              </svg>
+              {planMode ? "Plan Mode ON" : "Plan Mode OFF"}
+            </button>
+          </div>
+        ) : (
+          <>
+            {/* History */}
+            {messages.map((msg) => (
+              <ChatMessageBubble
+                key={msg.id}
+                message={msg}
+                markdownComponents={markdownComponents as Record<string, React.ComponentType<Record<string, unknown>>>}
+              />
+            ))}
+
+            {/* Active/streaming message */}
+            {hasActiveMessage && (
+              <div className="border-b border-zinc-800/50 pb-3 mb-3 last:border-0">
+                {/* User prompt */}
+                <div className="bg-zinc-900/30 rounded-md px-3 py-2 mb-2">
+                  <p className="text-sm text-zinc-400">{activePrompt}</p>
+                </div>
+
+                {/* Streaming result */}
+                {activeResult ? (
+                  <div className="text-sm text-zinc-200 px-1">
+                    <Markdown components={markdownComponents}>{activeResult}</Markdown>
+                    {resultStreaming && (
+                      <span className="inline-block h-4 w-1.5 animate-pulse bg-blue-400" />
+                    )}
+                  </div>
+                ) : streaming ? (
+                  <div className="flex flex-col items-center justify-center gap-3 py-8">
+                    <span className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-zinc-700 border-t-blue-400" />
+                    <span className="text-xs text-zinc-500">
+                      {activeActivity.length > 0
+                        ? `Researching... (${activeActivity.length} step${activeActivity.length !== 1 ? "s" : ""})`
+                        : "Starting..."}
+                    </span>
+                  </div>
+                ) : null}
+              </div>
             )}
-          </div>
-        ) : streaming ? (
-          <div className="flex flex-col items-center justify-center gap-3 py-12">
-            <span className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-zinc-700 border-t-blue-400" />
-            <span className="text-xs text-zinc-500">
-              {activity.length > 0
-                ? `Researching... (${activity.length} step${activity.length !== 1 ? "s" : ""})`
-                : "Starting..."}
-            </span>
-          </div>
-        ) : null}
+          </>
+        )}
       </div>
 
-      {/* Current Activity Indicator */}
-      {streaming && activity.length > 0 && (
+      {/* Current activity indicator */}
+      {streaming && activeActivity.length > 0 && (
         <div className="flex-shrink-0 border-t border-zinc-800 bg-zinc-900/30 px-4 py-2">
           <div className="flex items-center gap-2">
             <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-zinc-600 border-t-amber-400" />
             <span className="text-xs font-semibold text-amber-400">
-              {activity[activity.length - 1]?.toolName ?? "Working"}
+              {activeActivity[activeActivity.length - 1]?.toolName ?? "Working"}
             </span>
             <span className="truncate text-xs font-mono text-zinc-500">
-              {activity[activity.length - 1]?.detail ?? ""}
+              {activeActivity[activeActivity.length - 1]?.detail ?? ""}
             </span>
           </div>
         </div>
       )}
 
-      {/* Activity Feed — collapsible bottom section */}
-      {activity.length > 0 && (
+      {/* Activity feed — collapsible */}
+      {activeActivity.length > 0 && (
         <div className="flex-shrink-0 border-t border-zinc-800">
           <button
             onClick={() => setActivityOpen(!activityOpen)}
             className="flex w-full items-center justify-between px-4 py-1.5 text-xs text-zinc-500 hover:bg-zinc-900/50"
           >
-            <span className="font-semibold uppercase tracking-wider">
-              Activity
-            </span>
+            <span className="font-semibold uppercase tracking-wider">Activity</span>
             <div className="flex items-center gap-2">
               <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-bold text-zinc-400">
-                {activity.length}
+                {activeActivity.length}
               </span>
               <svg
                 className={`h-3 w-3 transition-transform ${activityOpen ? "rotate-180" : ""}`}
@@ -334,14 +473,14 @@ export function ChatPanel({ worktreePath }: Props) {
 
           {activityOpen && (
             <div className="max-h-40 overflow-y-auto border-t border-zinc-800/50">
-              {activity.map((item) => (
+              {activeActivity.map((item) => (
                 <div
                   key={item.id}
                   className="flex items-center gap-2 px-4 py-1 text-xs border-b border-zinc-800/30 last:border-0"
                 >
                   {item.type === "tool" ? (
                     <>
-                      <span className="text-amber-400">⚡</span>
+                      <span className="text-amber-400">-</span>
                       <span className="font-semibold text-zinc-400">{item.toolName}</span>
                       <span className="truncate font-mono text-zinc-600">{item.detail}</span>
                       {item.result && (
@@ -362,19 +501,67 @@ export function ChatPanel({ worktreePath }: Props) {
         </div>
       )}
 
+      {/* Plan mode indicator */}
+      {planMode && !streaming && (
+        <div className="flex-shrink-0 flex items-center gap-1.5 border-t border-amber-600/20 bg-amber-600/5 px-3 py-1">
+          <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+          <span className="text-[10px] text-amber-400/80">Plan mode — Claude will plan before coding</span>
+        </div>
+      )}
+
+      {/* Prompt history dropdown */}
+      {showHistory && promptHistory.length > 0 && (
+        <div className="flex-shrink-0 border-t border-zinc-800 max-h-48 overflow-y-auto">
+          <div className="flex items-center justify-between px-3 py-1.5">
+            <span className="text-[10px] uppercase tracking-wider text-zinc-600">Prompt History</span>
+            <button
+              onClick={() => setShowHistory(false)}
+              className="text-[10px] text-zinc-600 hover:text-zinc-400"
+            >
+              Close
+            </button>
+          </div>
+          {promptHistory.map((prompt, i) => (
+            <button
+              key={i}
+              onClick={() => handleSelectHistory(prompt)}
+              className="flex w-full items-center gap-2 border-t border-zinc-800/30 px-3 py-2 text-left text-xs text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200"
+            >
+              <svg className="h-3 w-3 flex-shrink-0 text-zinc-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+              </svg>
+              <span className="truncate">{prompt}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Input */}
       <div className="flex-shrink-0 border-t border-zinc-800 px-3 py-2">
         <div className="flex items-end gap-2">
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Ask Claude..."
-            rows={2}
-            className="flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-blue-600 placeholder:text-zinc-500"
-            style={{ maxHeight: 120 }}
-            disabled={streaming}
-          />
+          <div className="relative flex-1">
+            <textarea
+              value={input}
+              onChange={(e) => { setInput(e.target.value); setHistoryIndex(-1); }}
+              onKeyDown={handleKeyDown}
+              placeholder={promptHistory.length > 0 ? "Ask Claude... (↑ for history)" : "Ask Claude..."}
+              rows={2}
+              className="w-full resize-none rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 pr-8 text-sm text-zinc-200 outline-none focus:border-blue-600 placeholder:text-zinc-500"
+              style={{ maxHeight: 120 }}
+              disabled={streaming}
+            />
+            {promptHistory.length > 0 && !streaming && (
+              <button
+                onClick={() => setShowHistory(!showHistory)}
+                className={`absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded text-zinc-600 hover:text-zinc-300 ${showHistory ? "text-blue-400" : ""}`}
+                title="Prompt history"
+              >
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                </svg>
+              </button>
+            )}
+          </div>
           {streaming ? (
             <button
               onClick={handleCancel}
