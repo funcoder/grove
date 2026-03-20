@@ -17,10 +17,25 @@ export class WorktreeService {
     const git = simpleGit(this.repoPath);
     const worktreePath = this.getWorktreePath(branchName);
 
-    await git.raw(["worktree", "add", "-b", branchName, worktreePath, baseBranch]);
-    await this.runSetupHooks(worktreePath);
+    // Check if branch already exists — reuse it instead of trying to create
+    const branchExists = await this.branchExists(git, branchName);
+    if (branchExists) {
+      await git.raw(["worktree", "add", worktreePath, branchName]);
+    } else {
+      await git.raw(["worktree", "add", "-b", branchName, worktreePath, baseBranch]);
+    }
 
+    await this.runSetupHooks(worktreePath);
     return worktreePath;
+  }
+
+  private async branchExists(git: ReturnType<typeof simpleGit>, branchName: string): Promise<boolean> {
+    try {
+      await git.raw(["rev-parse", "--verify", branchName]);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async checkoutExisting(branchName: string): Promise<string> {
@@ -28,6 +43,23 @@ export class WorktreeService {
     const worktreePath = this.getWorktreePath(branchName);
 
     await git.raw(["worktree", "add", worktreePath, branchName]);
+    await this.runSetupHooks(worktreePath);
+
+    return worktreePath;
+  }
+
+  async checkoutRemote(remoteBranch: string): Promise<string> {
+    const git = simpleGit(this.repoPath);
+
+    // Strip remote prefix: "remotes/origin/feature-x" → "feature-x"
+    const localName = remoteBranch
+      .replace(/^remotes\/[^/]+\//, "")
+      .replace(/^origin\//, "");
+
+    const worktreePath = this.getWorktreePath(localName);
+
+    // Create local branch tracking remote + add worktree in one command
+    await git.raw(["worktree", "add", "-b", localName, worktreePath, remoteBranch]);
     await this.runSetupHooks(worktreePath);
 
     return worktreePath;

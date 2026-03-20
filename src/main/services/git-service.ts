@@ -35,6 +35,14 @@ export class GitService {
     }
   }
 
+  async fetch(): Promise<void> {
+    try {
+      await this.git.fetch();
+    } catch {
+      // Silently ignore fetch failures (offline, no remote, etc.)
+    }
+  }
+
   async getAheadBehind(worktreePath: string): Promise<AheadBehind> {
     const wt = simpleGit(worktreePath);
 
@@ -46,9 +54,23 @@ export class GitService {
         return { ahead: status.ahead, behind: status.behind };
       }
 
-      // No tracking branch — count all commits as unpushed
-      const log = await wt.log();
-      return { ahead: log.total, behind: 0 };
+      // No tracking branch — count commits ahead of the default remote branch
+      try {
+        const remoteRefs = await wt.raw(["rev-parse", "--verify", "origin/main"]);
+        if (remoteRefs.trim()) {
+          const log = await wt.log(["origin/main..HEAD"]);
+          return { ahead: log.total, behind: 0 };
+        }
+      } catch {
+        // origin/main doesn't exist, try origin/master
+        try {
+          const log = await wt.log(["origin/master..HEAD"]);
+          return { ahead: log.total, behind: 0 };
+        } catch {
+          // No remote reference at all
+        }
+      }
+      return { ahead: 0, behind: 0 };
     } catch {
       return { ahead: 0, behind: 0 };
     }
@@ -207,6 +229,54 @@ export class GitService {
     }
   }
 
+  async getCommitLog(
+    worktreePath: string,
+    maxCount: number = 20,
+    branch?: string
+  ): Promise<Array<{ sha: string; message: string; author: string; date: string }>> {
+    const wt = simpleGit(worktreePath);
+    const target = branch ?? "HEAD";
+    const raw = await wt.raw([
+      "log", target,
+      `--max-count=${maxCount}`,
+      "--format=%H%n%s%n%an%n%aI"
+    ]);
+
+    const lines = raw.trim().split("\n");
+    const commits: Array<{ sha: string; message: string; author: string; date: string }> = [];
+
+    for (let i = 0; i + 3 < lines.length; i += 4) {
+      commits.push({
+        sha: lines[i],
+        message: lines[i + 1],
+        author: lines[i + 2],
+        date: lines[i + 3]
+      });
+    }
+
+    return commits;
+  }
+
+  async cherryPick(worktreePath: string, commitSha: string): Promise<{ ok: boolean; message: string }> {
+    const wt = simpleGit(worktreePath);
+    try {
+      await wt.raw(["cherry-pick", commitSha]);
+      return { ok: true, message: "Cherry-pick successful" };
+    } catch (error) {
+      // Check if it's a merge conflict
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes("conflict")) {
+        return { ok: false, message: "Cherry-pick has conflicts — resolve them in the worktree" };
+      }
+      throw error;
+    }
+  }
+
+  async cherryPickAbort(worktreePath: string): Promise<void> {
+    const wt = simpleGit(worktreePath);
+    await wt.raw(["cherry-pick", "--abort"]);
+  }
+
   async stageFile(worktreePath: string, filePath: string): Promise<void> {
     const wt = simpleGit(worktreePath);
     await wt.add(filePath);
@@ -228,9 +298,27 @@ export class GitService {
     await wt.push(["-u", "origin", "HEAD"]);
   }
 
-  async pull(worktreePath: string): Promise<void> {
+  async pull(worktreePath: string): Promise<{ files: string[]; summary: string }> {
     const wt = simpleGit(worktreePath);
-    await wt.pull();
+    const result = await wt.pull();
+
+    const changedFiles = result.files ?? [];
+    const insertions = result.insertions ?? {};
+    const deletions = result.deletions ?? {};
+    const fileCount = changedFiles.length;
+
+    if (fileCount === 0) {
+      return { files: [], summary: "Already up to date" };
+    }
+
+    const totalInsertions = Object.values(insertions).reduce((sum, n) => sum + n, 0);
+    const totalDeletions = Object.values(deletions).reduce((sum, n) => sum + n, 0);
+
+    const parts = [`${fileCount} file${fileCount === 1 ? "" : "s"} changed`];
+    if (totalInsertions > 0) parts.push(`+${totalInsertions}`);
+    if (totalDeletions > 0) parts.push(`-${totalDeletions}`);
+
+    return { files: changedFiles, summary: parts.join(", ") };
   }
 
   async generateCommitMessage(worktreePath: string): Promise<string> {

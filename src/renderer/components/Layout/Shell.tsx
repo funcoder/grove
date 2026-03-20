@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useAppStore } from "../../state/use-app-store";
+import { useToastStore } from "../../state/use-toast-store";
 import { grove } from "../../lib/desktop-api";
 import { BranchList } from "../Worktrees/BranchList";
 import { FileTree } from "../Editor/FileTree";
@@ -7,10 +8,12 @@ import { CodeEditor } from "../Editor/CodeEditor";
 import { EditorTabs } from "../Editor/EditorTabs";
 import { DiffViewer } from "../Diff/DiffViewer";
 import { DiffToolbar } from "../Diff/DiffToolbar";
+import { CherryPickPanel } from "../Diff/CherryPickPanel";
 import { TerminalPanel } from "../Terminal/TerminalPanel";
 import { ChatPanel } from "../Chat/ChatPanel";
 import { ResizeHandle } from "./ResizeHandle";
 import { HorizontalResizeHandle } from "./HorizontalResizeHandle";
+import { Toast } from "./Toast";
 import { shellStore } from "../../lib/terminal-stores";
 import type { TabInfo } from "../../../main/ipc/contracts";
 
@@ -28,23 +31,29 @@ interface OpenFile {
 
 export function Shell() {
   const repos = useAppStore((s) => s.repos);
+  const activeRepoId = useAppStore((s) => s.activeRepoId);
   const setSnapshot = useAppStore((s) => s.setSnapshot);
+  const toastMessages = useToastStore((s) => s.messages);
+  const showToast = useToastStore((s) => s.show);
+  const dismissToast = useToastStore((s) => s.dismiss);
 
   const [sidebarPanel, setSidebarPanel] = useState<SidebarPanel>("worktrees");
   const [showTerminal, setShowTerminal] = useState(false);
   const [showCommitBar, setShowCommitBar] = useState(false);
+  const [showCherryPick, setShowCherryPick] = useState(false);
   const [terminalHeight, setTerminalHeight] = useState(200);
   const [claudePanelWidth, setClaudePanelWidth] = useState(384);
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activeFilePath, setActiveFilePath] = useState<string>();
   const saveTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  const activeRepo = repos[0];
+  const activeRepo = repos.find((r) => r.id === activeRepoId) ?? repos[0];
   const activeWorktree = activeRepo?.worktrees.find(
     (wt) => wt.id === activeRepo.activeWorktreeId
   );
   const activeFile = openFiles.find((f) => f.filePath === activeFilePath);
   const activeWorktreeAhead = activeWorktree?.aheadBehind.ahead ?? 0;
+  const activeWorktreeBehind = activeWorktree?.aheadBehind.behind ?? 0;
 
   // Poll for changed files and auto-open as diff tabs
   useEffect(() => {
@@ -225,16 +234,37 @@ export function Shell() {
   }, []);
 
   const handlePush = useCallback(async (worktreePath: string) => {
-    await grove.push({ worktreePath });
-    const snapshot = await grove.refresh();
-    setSnapshot(snapshot);
-  }, [setSnapshot]);
+    try {
+      await grove.push({ worktreePath });
+      const snapshot = await grove.refresh();
+      setSnapshot(snapshot);
+      showToast("Pushed successfully", "success");
+    } catch (error) {
+      showToast(`Push failed: ${error instanceof Error ? error.message : "Unknown error"}`, "error");
+    }
+  }, [setSnapshot, showToast]);
+
+  const [pullResult, setPullResult] = useState<{ files: string[]; summary: string } | null>(null);
 
   const handlePull = useCallback(async (worktreePath: string) => {
-    await grove.pull({ worktreePath });
-    const snapshot = await grove.refresh();
-    setSnapshot(snapshot);
-  }, [setSnapshot]);
+    try {
+      const result = await grove.pull({ worktreePath });
+      const snapshot = await grove.refresh();
+      setSnapshot(snapshot);
+
+      const summary = result?.summary ?? "Already up to date";
+      const files = result?.files ?? [];
+
+      if (files.length > 0) {
+        setPullResult({ files, summary });
+        showToast(`Pulled — ${summary}`, "success");
+      } else {
+        showToast(`Pulled — ${summary}`, "info");
+      }
+    } catch (error) {
+      showToast(`Pull failed: ${error instanceof Error ? error.message : "Unknown error"}`, "error");
+    }
+  }, [setSnapshot, showToast]);
 
   const tabs: TabInfo[] = openFiles.map((f) => ({
     filePath: f.filePath,
@@ -370,7 +400,7 @@ export function Shell() {
       {/* Center: Editor + Terminal Drawer */}
       <div className="flex flex-1 flex-col overflow-hidden">
         {/* Commit Bar */}
-        {activeWorktree && ((activeWorktree.changedFiles ?? 0) > 0 || activeWorktreeAhead > 0 || showCommitBar) && (
+        {activeWorktree && ((activeWorktree.changedFiles ?? 0) > 0 || activeWorktreeAhead > 0 || activeWorktreeBehind > 0 || showCommitBar) && (
           <DiffToolbar
             showStaged={false}
             onToggleStaged={() => {}}
@@ -384,12 +414,15 @@ export function Shell() {
               return message;
             }}
             onPush={async () => {
-              await grove.push({ worktreePath: activeWorktree.path });
-              const snapshot = await grove.refresh();
-              setSnapshot(snapshot);
+              await handlePush(activeWorktree.path);
             }}
+            onPull={async () => {
+              await handlePull(activeWorktree.path);
+            }}
+            onCherryPick={() => setShowCherryPick(true)}
             hasChanges={(activeWorktree.changedFiles ?? 0) > 0}
             aheadCount={activeWorktreeAhead}
+            behindCount={activeWorktreeBehind}
           />
         )}
 
@@ -417,6 +450,43 @@ export function Shell() {
               filePath={activeFile.filePath}
               onChange={handleEditorChange}
             />
+          ) : showCherryPick && activeWorktree && activeRepo ? (
+            <CherryPickPanel
+              worktreePath={activeWorktree.path}
+              currentBranch={activeWorktree.branch}
+              repo={activeRepo}
+              onClose={() => setShowCherryPick(false)}
+            />
+          ) : pullResult ? (
+            <div className="flex h-full flex-col overflow-hidden">
+              <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2">
+                <div className="flex items-center gap-3">
+                  <span className="text-sm font-semibold text-zinc-200">Pull Complete</span>
+                  <span className="rounded bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">{pullResult.summary}</span>
+                </div>
+                <button
+                  onClick={() => setPullResult(null)}
+                  className="text-xs text-zinc-500 hover:text-zinc-300"
+                >
+                  Dismiss
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-4">
+                <div className="space-y-1">
+                  {pullResult.files.map((file) => (
+                    <div
+                      key={file}
+                      className="flex items-center gap-2 rounded px-2 py-1 text-sm text-zinc-300 hover:bg-zinc-800/50"
+                    >
+                      <svg className="h-4 w-4 flex-shrink-0 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                      </svg>
+                      <span className="font-mono text-xs">{file}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
           ) : (
             <div className="flex h-full items-center justify-center">
               <div className="text-center">
@@ -474,6 +544,8 @@ export function Shell() {
       )}
 
       </div>{/* end content row */}
+
+      <Toast messages={toastMessages} onDismiss={dismissToast} />
 
       {/* Status Bar */}
       <div className="flex h-6 flex-shrink-0 items-center justify-between border-t border-zinc-800 bg-zinc-900 px-3">

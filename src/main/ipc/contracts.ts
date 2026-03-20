@@ -36,6 +36,7 @@ export interface RepoInfo {
 // ── Snapshot Types ──────────────────────────────────────────────
 
 export interface RepoSnapshot {
+  id: string;
   repo: RepoInfo;
   worktrees: WorktreeInfo[];
   activeWorktreeId: string;
@@ -162,6 +163,16 @@ export interface PushInput {
   worktreePath: string;
 }
 
+export interface PullInput {
+  worktreePath: string;
+}
+
+export interface PullResult {
+  ok: boolean;
+  files: string[];
+  summary: string;
+}
+
 // ── Run Types ───────────────────────────────────────────────────
 
 export interface DetectRunCommandInput {
@@ -264,6 +275,14 @@ export const ClaudeChatCancelSchema = z.object({
   sessionId: z.string().min(1)
 });
 
+export interface ClaudeChatResetInput {
+  worktreePath: string;
+}
+
+export const ClaudeChatResetSchema = z.object({
+  worktreePath: z.string().min(1)
+});
+
 export const OpenRepoSchema = z.object({
   path: z.string().min(1)
 });
@@ -286,6 +305,16 @@ export const SetActiveWorktreeSchema = z.object({
 export const CheckoutBranchSchema = z.object({
   repoPath: z.string().min(1),
   branchName: z.string().min(1)
+});
+
+export interface CheckoutRemoteBranchInput {
+  repoPath: string;
+  remoteBranch: string;
+}
+
+export const CheckoutRemoteBranchSchema = z.object({
+  repoPath: z.string().min(1),
+  remoteBranch: z.string().min(1)
 });
 
 export const ReadDirectorySchema = z.object({
@@ -332,6 +361,50 @@ export const GenerateCommitMessageSchema = z.object({
 });
 
 export const PushSchema = z.object({
+  worktreePath: z.string().min(1)
+});
+
+export const PullSchema = z.object({
+  worktreePath: z.string().min(1)
+});
+
+// ── Cherry-Pick Types ──────────────────────────────────────────
+
+export interface CommitInfo {
+  sha: string;
+  message: string;
+  author: string;
+  date: string;
+}
+
+export interface CommitLogInput {
+  worktreePath: string;
+  maxCount?: number;
+  branch?: string;
+}
+
+export interface CherryPickInput {
+  worktreePath: string;
+  commitSha: string;
+}
+
+export interface CherryPickResult {
+  ok: boolean;
+  message: string;
+}
+
+export const CommitLogSchema = z.object({
+  worktreePath: z.string().min(1),
+  maxCount: z.number().int().positive().optional(),
+  branch: z.string().optional()
+});
+
+export const CherryPickSchema = z.object({
+  worktreePath: z.string().min(1),
+  commitSha: z.string().min(1)
+});
+
+export const CherryPickAbortSchema = z.object({
   worktreePath: z.string().min(1)
 });
 

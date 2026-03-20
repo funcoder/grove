@@ -6,6 +6,7 @@ import {
   RemoveWorktreeSchema,
   SetActiveWorktreeSchema,
   CheckoutBranchSchema,
+  CheckoutRemoteBranchSchema,
   ReadDirectorySchema,
   ReadFileSchema,
   WriteFileSchema,
@@ -15,7 +16,11 @@ import {
   UnstageFileSchema,
   CommitSchema,
   GenerateCommitMessageSchema,
+  PullSchema,
   PushSchema,
+  CommitLogSchema,
+  CherryPickSchema,
+  CherryPickAbortSchema,
   TerminalCreateSchema,
   TerminalWriteSchema,
   TerminalResizeSchema,
@@ -24,6 +29,7 @@ import {
   ClaudeChatInitSchema,
   ClaudeChatSendSchema,
   ClaudeChatCancelSchema,
+  ClaudeChatResetSchema,
   DetectRunCommandSchema
 } from "./contracts.js";
 import { FileService } from "../services/file-service.js";
@@ -190,6 +196,14 @@ export const registerHandlers = (): void => {
     );
   });
 
+  ipcMain.handle("branch:checkoutRemote", async (event, input: unknown) => {
+    const parsed = CheckoutRemoteBranchSchema.parse(input);
+    return requireController(event.sender).checkoutRemoteBranch(
+      parsed.repoPath,
+      parsed.remoteBranch
+    );
+  });
+
   // ── Files ──
   ipcMain.handle("file:readDirectory", async (_event, input: unknown) => {
     const parsed = ReadDirectorySchema.parse(input);
@@ -260,9 +274,29 @@ export const registerHandlers = (): void => {
   });
 
   ipcMain.handle("diff:pull", async (_event, input: unknown) => {
-    const parsed = PushSchema.parse(input);
+    const parsed = PullSchema.parse(input);
     const git = new GitService(parsed.worktreePath);
-    await git.pull(parsed.worktreePath);
+    const result = await git.pull(parsed.worktreePath);
+    return { ok: true, files: result.files, summary: result.summary };
+  });
+
+  // ── Cherry-Pick ──
+  ipcMain.handle("git:commitLog", async (_event, input: unknown) => {
+    const parsed = CommitLogSchema.parse(input);
+    const git = new GitService(parsed.worktreePath);
+    return git.getCommitLog(parsed.worktreePath, parsed.maxCount, parsed.branch);
+  });
+
+  ipcMain.handle("git:cherryPick", async (_event, input: unknown) => {
+    const parsed = CherryPickSchema.parse(input);
+    const git = new GitService(parsed.worktreePath);
+    return git.cherryPick(parsed.worktreePath, parsed.commitSha);
+  });
+
+  ipcMain.handle("git:cherryPickAbort", async (_event, input: unknown) => {
+    const parsed = CherryPickAbortSchema.parse(input);
+    const git = new GitService(parsed.worktreePath);
+    await git.cherryPickAbort(parsed.worktreePath);
     return { ok: true };
   });
 
@@ -354,6 +388,13 @@ export const registerHandlers = (): void => {
     const service = getChatService(event.sender);
     service.cancelMessage(parsed.sessionId);
     return { ok: true };
+  });
+
+  ipcMain.handle("claude-chat:reset", (event, input: unknown) => {
+    const parsed = ClaudeChatResetSchema.parse(input);
+    const service = getChatService(event.sender);
+    const sessionId = service.resetSession(parsed.worktreePath);
+    return { sessionId };
   });
 
   // ── Run ──

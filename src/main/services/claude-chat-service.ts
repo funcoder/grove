@@ -57,7 +57,9 @@ export class ClaudeChatService {
       "-p",
       "--output-format", "stream-json",
       "--verbose",
-      "--dangerously-skip-permissions"
+      "--dangerously-skip-permissions",
+      "--append-system-prompt",
+      `CRITICAL: Your working directory is ${session.worktreePath} — this is a git worktree. You MUST only read and edit files within this directory. Do NOT navigate to or modify files in any other directory or worktree. Always use absolute paths within ${session.worktreePath}.`
     ];
 
     // Continue existing conversation
@@ -116,6 +118,19 @@ export class ClaudeChatService {
     const session = this.sessions.get(sessionId);
     if (!session?.activeProcess || session.activeProcess.killed) return;
     session.activeProcess.kill();
+  }
+
+  resetSession(worktreePath: string): string {
+    // Find and destroy existing session for this worktree
+    for (const [id, session] of this.sessions) {
+      if (session.worktreePath === worktreePath) {
+        this.destroy(id);
+        break;
+      }
+    }
+
+    // Create a fresh session (no conversationId = no --resume)
+    return this.getOrCreateSession(worktreePath);
   }
 
   destroy(sessionId: string): void {

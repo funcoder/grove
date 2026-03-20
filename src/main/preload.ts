@@ -6,6 +6,7 @@ import type {
   RemoveWorktreeInput,
   SetActiveWorktreeInput,
   CheckoutBranchInput,
+  CheckoutRemoteBranchInput,
   ReadDirectoryInput,
   ReadFileInput,
   WriteFileInput,
@@ -17,6 +18,12 @@ import type {
   CommitInput,
   GenerateCommitMessageInput,
   PushInput,
+  PullInput,
+  PullResult,
+  CommitLogInput,
+  CommitInfo,
+  CherryPickInput,
+  CherryPickResult,
   DiffFileInfo,
   FileDiffResult,
   TerminalCreateInput,
@@ -26,6 +33,7 @@ import type {
   ClaudeSpawnInput,
   ClaudeChatSendInput,
   ClaudeChatEvent,
+  ClaudeChatResetInput,
   DetectRunCommandInput,
   RunCommandResult
 } from "./ipc/contracts.js";
@@ -54,6 +62,9 @@ const api = {
 
   checkoutBranch: (input: CheckoutBranchInput): Promise<AppSnapshot> =>
     ipcRenderer.invoke("branch:checkout", input),
+
+  checkoutRemoteBranch: (input: CheckoutRemoteBranchInput): Promise<AppSnapshot> =>
+    ipcRenderer.invoke("branch:checkoutRemote", input),
 
   readDirectory: (input: ReadDirectoryInput): Promise<FileTreeNode[]> =>
     ipcRenderer.invoke("file:readDirectory", input),
@@ -85,8 +96,17 @@ const api = {
   push: (input: PushInput): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke("diff:push", input),
 
-  pull: (input: PushInput): Promise<{ ok: boolean }> =>
+  pull: (input: PullInput): Promise<PullResult> =>
     ipcRenderer.invoke("diff:pull", input),
+
+  getCommitLog: (input: CommitLogInput): Promise<CommitInfo[]> =>
+    ipcRenderer.invoke("git:commitLog", input),
+
+  cherryPick: (input: CherryPickInput): Promise<CherryPickResult> =>
+    ipcRenderer.invoke("git:cherryPick", input),
+
+  cherryPickAbort: (input: { worktreePath: string }): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke("git:cherryPickAbort", input),
 
   // Terminal
   terminalCreate: (input: TerminalCreateInput): Promise<{ terminalId: string; existing: boolean }> =>
@@ -147,6 +167,9 @@ const api = {
 
   claudeChatCancel: (input: { sessionId: string }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke("claude-chat:cancel", input),
+
+  claudeChatReset: (input: ClaudeChatResetInput): Promise<{ sessionId: string }> =>
+    ipcRenderer.invoke("claude-chat:reset", input),
 
   onClaudeChatEvent: (listener: (event: ClaudeChatEvent) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, chatEvent: ClaudeChatEvent) =>
